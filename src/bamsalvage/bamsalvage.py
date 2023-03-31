@@ -1,7 +1,3 @@
-"""
-Python script salvages sequences from corrupted BAM files.
-
-"""
 import os, sys, re, io
 import argparse, struct
 import mgzip, gzip
@@ -13,13 +9,6 @@ import numpy as np
 
 @numba.njit(cache=True)
 def convert_bytes_to_seq(buffer:bytes, start:int, l_seq:int, text:bytearray):
-    """Numba-acceralated nucleotide converter from 4-bit compressed buffer to a sequence.
-    Args:
-        buffer (bytes): Unzipped buffer from BGZF block
-        start (int): Start position of the sequence
-        l_seq (int): Length of the sequence
-        text (bytearray): Output buffer in bytes
-    """
     bases = [61, 65, 67, 77, 71, 82, 83, 86, 84, 87, 89, 72, 75, 68, 66, 78] # '=ACMGRSVTWYHKDBN'
     j = 0
     end = start + (l_seq + 1) // 2
@@ -29,16 +18,8 @@ def convert_bytes_to_seq(buffer:bytes, start:int, l_seq:int, text:bytearray):
         if j + 1 >= l_seq: break
         text[j+1] = bases[b & 15]
         j += 2
-
 @numba.njit(cache=True)
 def convert_bytes_to_qual(buffer:bytes, start:int, l_seq:int, text:bytearray):
-    """Numba-acceralated QUAL interpreter, simply add 33 to the uchr number.
-    Args:
-        buffer (bytes): Unzipped buffer from BGZF block
-        start (int): Start position of the qual
-        l_seq (int): Length of the qual
-        text (bytearray): Output buffer in bytes
-    """
     j = 0
     end = start + l_seq
     for i in range(start, end):
@@ -47,15 +28,6 @@ def convert_bytes_to_qual(buffer:bytes, start:int, l_seq:int, text:bytearray):
 
 @numba.njit(cache=True)
 def scan_block_header(buffer:bytes, start:numba.int64)->numba.int64:
-    """Scanning function of the block header in possible corrupted buffer.
-
-    Args:
-        buffer (bytes): BGZF data block possibly lost the entry point.
-        start (numba.int64): Initial position of scan.
-
-    Returns:
-        numba.int64: Detected start position if possible (-1 will be retruned if no candidates were detected)
-    """
     le_I = np.dtype('uint32')#.newbyteorder('<')
     le_i = np.dtype('int32')#.newbyteorder('<')
     for i in range(start, len(buffer)-36):
@@ -63,12 +35,13 @@ def scan_block_header(buffer:bytes, start:numba.int64)->numba.int64:
         refid = np.frombuffer(buffer[i+4:i+8], dtype=le_i)[0]
         l_read_name = np.frombuffer(buffer[i+12:i+16], dtype=np.uint8)[0]
         l_seq = np.frombuffer(buffer[i+20:i+24], dtype=le_I)[0]
-        if 0 <= l_seq < block_size * 3 // 2 and l_read_name > 1 and -1 <= refid < 200 and block_size + start < len(buffer):
+#        block_size, refid, mappos, l_read_name, mapq, bai_bin, n_cigar_op, flag, l_seq, next_refid, next_pos, tlen \
+#            = struct.unpack('<IiiBBHHHIiii', buffer[i:i+36])
+        if 0 <= l_seq < block_size * 3 // 2 and l_read_name > 4 and -1 <= refid < 200 and block_size + start < len(buffer):
             return i
     return -1
 
 def get_logger(name=None, stdout=True, logfile=None):
-    """Logging object  """
     if name is None:
         name = sys._getframe().f_code.co_name
         pass
@@ -108,26 +81,36 @@ def read_next_block(handler, **kwargs):
         _type_: _description_
     """
     logger = kwargs.get('logger', None)
-    values = struct.unpack('BBBBIBBH', handler.read(12))
 
     # GZIP header, ID1=31, ID2=139
-    if values[0] != 31 or values[1] != 139:
+    buf = handler.read(2)
+    gzheader = struct.unpack('BB', buf)
+    if gzheader[0] != 31 or gzheader[1] != 139:
         if logger:
-            logger.warning('GZIP header invalid')
-        raise Exception('data block is not gzipped file')
+            logger.warning('lost GZIP header, scanning')
+        while gzheader[0] != 31 or gzheader[1] != 139:
+            if len(buf) < 2:
+                raise Exception('reached file end')
+            buf[0] = buf[1]
+            buf[1] = struct.unpack('B', handler.read(1))
+            gzheader = struct.unpack('BB', buf)
+    buf = handler.read(10)
+    values = struct.unpack('<BBIBBH', buf)
     xlen = values[-1]
+    if xlen > 65535:
+        raise Exception('GZBF block size exceeded {}'.format(xlen))
     buf = handler.read(xlen)
-    si1, si2, slen, bsize = struct.unpack('BBHH', buf[0:6])
+    si1, si2, slen, bsize = struct.unpack('<BBHH', buf[0:6])
     if si1 != 66 or si2 != 67:
         if logger:
             logger.warning('corrupted\n')
+        # print('SI', si1, si2)
         raise Exception('SI1={}, SI2={} should be 66 and 67'.format(si1, si2))
     decobj = zlib.decompressobj(-15) # no header
     compressed = handler.read(bsize - xlen - 19)
     expected_crc = handler.read(4)
     expected_size = struct.unpack('<I', handler.read(4))[0]
     data = decobj.decompress(compressed) + decobj.flush()
-
     # CRC check
     crc = zlib.crc32(data)
     if crc < 0:
@@ -138,6 +121,7 @@ def read_next_block(handler, **kwargs):
         raise Exception('CRC is {:x} , not {:x}'.format(crc, expected_crc))
     if expected_size != len(data):
         sys.stderr.write(f'inconsistent size of decompressed buffer {expected_size} / {len(data)}\n')
+        raise Exception(f'inconsistent zlib size {expected_size} / {len(data)}')
     # print('{}:{} ({})=> {} ({})'.format(idx, len(compressed), bsize, expected_size, len(textdata)))
     return data
 
@@ -155,25 +139,34 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
     info = {'input':filename_bam, 'output':filename_fastq}
     force_continuation = kwargs.get('forced', False)
     limit = kwargs.get('limit', 0)
-    
-    fasta_mode = re.search('\\.m?fa(\\.gz)?$', filename_fastq)
-    
-    if filename_fastq.endswith('.gz'):                                                                                                                                                   
+
+    fasta_mode = filename_fastq is None or re.search('\\.m?fa(\\.gz)?$', filename_fastq)
+
+    if filename_fastq is None:
+        ostr = None
+    elif filename_fastq.endswith('.gz'):                                                                                                                                                   
         n_threads = kwargs.get('threads', 4)
         ostr = io.TextIOWrapper(mgzip.open(filename_fastq, 'wb', thread=n_threads))
     else:
         ostr = open(filename_fastq, 'w')
     
     filesize = os.path.getsize(filename_bam)
+    TRACE_ID_READING = 0
+    TRACE_ID_ALIGNMENT = 1
+    tracing_situations = [TRACE_ID_READING, TRACE_ID_ALIGNMENT]
+    tracing_ptr = [-1] * (max(tracing_situations) + 1)
+
     with open(filename_bam, 'rb') as fi:
-        idx = 0
-        offset = 0
         references = []
-        # idx_block = 0
-        n_blocks = n_corrupted_blocks = 0
+        n_blocks = 0
+        n_corrupted_blocks = 0
+        n_malformed_gzip_blocks = 0
+        n_unaligned_blocks = 0
         
         # read header
+        file_ptr = 0 # pointer of file for backtracking
         try:
+            n_blocks += 1
             data = read_next_block(fi)
             if data[0:4] != b'BAM\1':
                 logger.warning('BAM header lost\n')
@@ -181,8 +174,8 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
             l_text = struct.unpack('<I', data[4:8])[0]
             while l_text + 12 > len(data):
                 sys.stderr.write('reading remant header {}/{}\n'.format(len(data), l_text))
-                data += read_next_block(fi)
                 n_blocks += 1
+                data += read_next_block(fi)
             text_ = data[8:8+l_text].decode('latin-1')
             pos = 8 + l_text
             # load references
@@ -200,54 +193,53 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
                 pos += 4
                 if pos > len(data): #
                     # logger.info('extend header block {} / {}'.format(pos, len(data)))
-                    data += read_next_block(fi)
                     n_blocks += 1
+                    data += read_next_block(fi)
             info['references'] = references
         except Exception as e:
-            # failed to decompress given buffer, ignore the block if continuation is set
             if not force_continuation:
                 raise
             logger.warning('header was corrupted, skip header blocks')
-            n_corrupted_blocks += 1
+            n_malformed_gzip_blocks += 1
 
         # alignment section
         n_seqs = 0
         keep_running = True
         scanning = False
+        data = []
         while keep_running:
-            if fi.tell() >= filesize: # check position is in the file size
+            # first block after buffer flushing
+            file_ptr = fi.tell()
+            if file_ptr >= filesize: # check position is in the file size
                 break
             try:
                 n_blocks += 1
                 data = read_next_block(fi)
             except:
+                # print(file_ptr)
+                tracing_ptr[TRACE_ID_READING] = file_ptr
                 if not force_continuation:
                     raise
-                n_corrupted_blocks += 1
+                n_malformed_gzip_blocks += 1
                 # sys.stderr.write('block {} ({:.1f}% in all) was corrupted.\n'.format(n_blocks, n_corrupted_blocks * 100. / n_blocks))
                 scanning = True
-                continue # skip the corrupted block
+                continue
             pos = 0
+            
             if scanning:
                 sys.stderr.write('\033[Kscanning {}\r'.format(n_blocks))
                 pos_scanned = scan_block_header(data, pos)
                 if pos_scanned >= 0:
                     pos = pos_scanned
                     scanning = False
-                else: # no candidate position detected, discard current buffer and load next block
+                else:
                     continue
-                    
-                # for i in range(len(data) - 36):
-                #     block_size, refid, mappos, l_read_name, mapq, bai_bin, n_cigar_op, flag, l_seq, next_refid, next_pos, tlen \
-                #         = struct.unpack('<IiiBBHHHIiii', data[pos:pos + 36])
-                #     if l_seq < block_size * 3 // 2 and l_read_name > 1 and -1 <= refid < len(references) and block_size < len(data):
-                #         pos = i
-                #         scanning = False
-                #         break
-#                if scanning:
-#                    continue
-
+                
+            # read data until the end of block
             while pos < len(data):
+                file_ptr = fi.tell()
+                if file_ptr >= filesize: # check position is in the file size
+                    break
                 if pos > 0:
                     data = data[pos:]
                     pos = 0
@@ -262,26 +254,25 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
                         n_blocks += 1
                         data += read_next_block(fi)
                     except Exception as e:
+                        tracing_ptr[TRACE_ID_READING] = file_ptr
+                        n_malformed_gzip_blocks += 1
                         if not force_continuation:
                             raise
                         logger.warning('\033[Kfailed to loading : {}'.format(str(e)))
                         data = []
                         break
-#                    print(block_size, len(data))
                 if len(data) == 0: # skip blocks
-                    n_corrupted_blocks += 1
-                    #data = None
-                    #pos = 0
                     scanning = True
                     break
                     
                 # assert variable range
-                if l_seq >= block_size * 3 // 2 or l_read_name == 0 or refid < -2 or refid >= len(references): # invalid block
+                if l_seq >= block_size * 3 // 2 or l_read_name < 5 or refid < -2 or refid >= len(references): # invalid block
+                    n_unaligned_blocks += 1
+                    tracing_ptr[TRACE_ID_ALIGNMENT] = file_ptr
                     if not force_continuation:
                         raise Exception('invalid field range in {}th seq'.format(n_seqs))
-                    sys.stderr.write(f'l_seq={l_seq}, l_read_name={l_read_name}, refid={refid}, block_size={block_size} / {len(data)}\n')
+                    # sys.stderr.write(f'l_seq={l_seq}, l_read_name={l_read_name}, refid={refid}, block_size={block_size} / {len(data)}\n')
                     #logger.warning('{} th corrupted block in {} : (pos={})'.format(n_corrupted_blocks, n_blocks, pos))
-                    n_corrupted_blocks += 1
                     scanning = True
                     data = []
                     pos = 0
@@ -293,48 +284,33 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
                 pos += 36
                 seqid = data[pos:pos + l_read_name].decode('latin-1')[:-1]
                 pos += l_read_name
-                cigar = data[pos:pos + 4 * n_cigar_op]
-                pos += n_cigar_op * 4
-                seq = ''
+                n_seqs += 1
 
-                if fasta_mode: # output only sequence
-                    sequence = bytearray(l_seq)
-                    convert_bytes_to_seq(data, pos, l_seq, sequence)
-                    pos = ptr_block_start + block_size
-                    ostr.write('>{}\n{}\n'.format(seqid, sequence.decode('ascii')))
-                    n_seqs += 1
-                else: # fastq requires sequence and qual
-                    sequence = bytearray(l_seq)
-                    convert_bytes_to_seq(data, pos, l_seq, sequence)
-                    # i_ = 0
-                    # for base in data[pos:pos + (l_seq + 1)//2]:
-                    #     seq += bases[base >> 4] + bases[base & 15]
-                    # if l_seq % 2 == 1: # trim last base for odd length
-                    #     seq = seq[:-1]
-                        
-                    # seq = seq.strip('=')
-                    if l_seq > 0:
-                        ostr.write('@{}\n{}\n+\n'.format(seqid, sequence.decode('ascii')))
-                    pos += (l_seq + 1) // 2
-                    if l_seq > 0:
-                        convert_bytes_to_qual(data, pos, l_seq, sequence)
-                        ostr.write('{}\n'.format(sequence.decode('ascii')))
-
-                    # qual = ''
-                    # for v_ in data[pos:pos + l_seq]:
-                    #     qual += chr(v_ + 33)
-                        
-                    # print('{}:{}\t{}\t{}\t{}/{}'.format(n_blocks, pos, seqid, seq[0:20] + '..' + seq[-20:], len(seq), len(qual)))
-                    pos += l_seq
-                    # ostr.write('@{}\n{}\n+\n{}\n'.format(seqid, seq, qual))
-                    n_seqs += 1
-                # display current status
+                if ostr:
+                    if fasta_mode:
+                        sequence = bytearray(l_seq)
+                        convert_bytes_to_seq(data, pos, l_seq, sequence)
+                        # seq_ = sequence.decode('ascii')
+                        ostr.write('>{}\n{}\n'.format(seqid, sequence.decode('ascii')))
+                    else:
+                        sequence = bytearray(l_seq)
+                        convert_bytes_to_seq(data, pos, l_seq, sequence)
+                        if l_seq > 0:
+                            ostr.write('@{}\n{}\n+\n'.format(seqid, sequence.decode('ascii')))
+                        pos += (l_seq + 1) // 2
+                        if l_seq > 0:
+                            convert_bytes_to_qual(data, pos, l_seq, sequence)
+                            ostr.write('{}\n'.format(sequence.decode('ascii')))
+                        # print('{}:{}\t{}\t{}\t{}/{}'.format(n_blocks, pos, seqid, seq[0:20] + '..' + seq[-20:], len(seq), len(qual)))
+                        pos += l_seq
+                pos = ptr_block_start + block_size
                 if n_seqs % 1000 == 0:
                     if limit > 0 and n_seqs >= limit:
                         keep_running = False
                         break
                     percentage = fi.tell() / filesize * 100.0
-                    sys.stderr.write('\033[K {:.1f}% {}\t{} kreads\t{} blocks ({} corrupted)\r'.format(percentage, seqid[:16], n_seqs // 1000, n_blocks, n_corrupted_blocks))
+                    sys.stderr.write('\033[K {:.1f}% {}\t{} kreads\t{} blocks ({},{} corrupted)\r'.format(
+                        percentage, seqid[:16], n_seqs // 1000, n_blocks, n_malformed_gzip_blocks, n_unaligned_blocks))
 
                 block_end = ptr_block_start + block_size
 
@@ -342,7 +318,9 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
                 if True: 
                     pos = block_end
                     continue
-                    
+
+                cigar = data[pos:pos + 4 * n_cigar_op]
+                pos += n_cigar_op * 4
                 while pos + 3 < block_end:
                     tag = data[pos:pos + 2].decode('latin-1')
                     val_type = chr(data[pos + 2]) # A:chr, c:i8, C:u8, s:i16, S:U16, i:i32, I:U32, f:float
@@ -379,22 +357,36 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
                         elif atype in ('i', 'I', 'f'):
                             pos += count_ * 4
                         while pos > len(data):
-                            data += read_next_block(fi)
-                            sys.stderr.write('buffer extended to {} / {}\n'.format(pos, len(data)))
-                            n_blocks += 1
+                            try:
+                                n_blocks += 1
+                                data += read_next_block(fi)
+                                sys.stderr.write('buffer extended to {} / {}\n'.format(pos, len(data)))
+                            except:
+                                tracing_ptr[TRACE_ID_READING] = file_ptr
+                                n_malformed_gzip_blocks += 1
+                                if not force_continuation:
+                                    raise
                     else:
                         if not force_continuation:
                             raise Exception('invalid character {}'.format(int(data[pos+2])))
-                        n_corrupted_blocks += 1
+                        n_unaligned_blocks += 1
                         # raise Exception('invalid value type character {} at {} / {}'.format(ord(val_type), pos, len(data)))
                         break
                     pass
-            idx += 1
-    ostr.close()
+    if ostr:
+        ostr.close()
     sys.stderr.write('\033[K\r')
     info['n_seqs'] = n_seqs
     info['n_blocks'] = n_blocks
-    info['n_corrupted'] = n_corrupted_blocks 
+    info['n_corrupted'] = n_malformed_gzip_blocks + n_unaligned_blocks
+    info['n_malformed_gzip_blocks'] =  n_malformed_gzip_blocks
+    info['n_unaligned_blocks'] = n_unaligned_blocks
+
+    # info['traces'] = {'':tracking
+    info['tracing'] = {
+        'reading':tracing_ptr[TRACE_ID_READING],
+        'alignment':tracing_ptr[TRACE_ID_ALIGNMENT]}
+
     return info
     
 def main():
@@ -406,21 +398,24 @@ def main():
     parser.add_argument('-i', '--input', nargs='+')
     parser.add_argument('-o','--outdir', default='rescued')
     parser.add_argument('--verbose', action='store_true')
-    parser.add_argument('--fasta', action='store_true')
-    parser.add_argument('--gzip', action='store_true', help='compress output file')
+    parser.add_argument('--mode', choices=['test', 'fasta', 'fasta.gz', 'fastq', 'fastq.gz', 'fa.gz', 'fa', 'fz', 'fq', 'fqz'], default='fastq.gz',
+                        help='output mode (test:no output, fq/fastq:fastq fqz/fastq.gz/gzipped fastq, fa/fasta:fasta, fz:gzipped fasta)')
+    # parser.add_argument('--fasta', action='store_true')
+    # parser.add_argument('--gzip', action='store_true', help='compress output file')
     parser.add_argument('--limit', type=int, default=0)
-    parser.add_argument('-p', type=int, default=4, metavar='number', help='Number of threads for gzip compression')
+    parser.add_argument('-p', type=int, default=4, metavar='number', help='Number of threads for gzip compression, this option is ignored if mode is not gzipped output')
     parser.add_argument('--ignore-corrupted', action='store_true')
     
     args = parser.parse_args()
     outdir = args.outdir
-    gzipped = args.gzip
     n_threads = args.p
     os.makedirs(outdir, exist_ok=True)
     limit = args.limit
     filenames = args.input
     forced = args.ignore_corrupted
-    fasta = args.fasta
+    mode = args.mode
+    gzipped = mode in ('fz', 'fastq.gz', 'fqz', 'fasta.gz', 'fa.gz')
+    fasta = mode in ('fa', 'fasta', 'fa.gz', 'fz')
 
     logger = get_logger(os.path.basename(__file__))
     if args.verbose:
@@ -430,23 +425,24 @@ def main():
         'input':filenames,
         'files':[],
     }
-    fn_info = os.path.join(outdir, 'run.info')
         
     for filename in filenames:
         if filename.endswith('.bam'):
             title = os.path.basename(filename)[0:-4]
-            if fasta:
+            if mode == 'test': # no output
+                filename_out = None
+            elif fasta:
                 filename_out = os.path.join(outdir, title + '.fa')
             else:
                 filename_out = os.path.join(outdir, title + '.fastq')
             if gzipped:
                 filename_out += '.gz'
             finfo = retrieve_fastq_from_bam(filename, filename_out, logger=logger, limit=limit, forced=forced, threads=n_threads)
-            # finfo['filename'] = filename
             info['files'].append(finfo)
             
-            with open(fn_info, 'w') as fo:
-                json.dump(info, fo, indent=2)
+    fn_info = os.path.join(outdir, 'run.info')
+    with open(fn_info, 'w') as fo:
+        json.dump(info, fo, indent=2)
     
 if __name__ == '__main__':
     main()
