@@ -4,8 +4,21 @@ import mgzip, gzip
 import zlib, logging, json
 import numba
 import numpy as np
-# sys.path.append('/mnt/nas/genomeplatform/scripts/')
-# import tkutil
+
+class BAMException(Exception):
+    """Exception for BAM decoding
+    """
+    FILE_END = 0
+    NO_HEADER = 1
+    BUFFER_SIZE_OVERFLOW = 2
+    CRC32_INCORRECT = 3
+    FAILED_DECOMPRESSION = 4
+    __KIND = ['End of file', 'No header found', 'Buffer size overflow', 'CRC32 was incorrect', 'Decompression failed']
+    def __init__(self, kind:int, message:string):
+        super(BAMException, self).__init__(message)
+        self.__kind = max(0, min(4, kind))
+    def __str__(self):
+        return '{} {}'.format(super(BAMException, self).__str__, BAMException.__KIND[self.__kind])
 
 @numba.njit(cache=True)
 def convert_bytes_to_seq(buffer:bytes, start:int, l_seq:int, text:bytearray):
@@ -64,6 +77,75 @@ def get_logger(name=None, stdout=True, logfile=None):
     logger.propagate = False
     return logger
 
+def scan_next_block(handler, **kwargs):
+    """Read BGZF block
+
+     ID1   0-0 u8 = 31 
+     ID2   1-1 u8 = 139
+     CM    2-2 u8 = 8
+     FLG   3-3 u8 = 4
+     MTIME 4-7 u32
+     XFL   8-8 u8
+     OS    9-9 u8
+     XLEN  10-11 u16
+     SI1    | u8
+     SI2    | u8
+     SLEN   | u16
+     BSIZE  | u16 12-12 + XLEN (min 6)
+     CDATA u8[BSIZE-XLEN-19]
+     CRC32 u32
+     ISIZE u32
+
+    BBBB I BBH BBH H/BII
+
+    Args:
+        handler (_io.TextIOWrapper): File handler
+        logger : logging.StreamHandler
+
+    Raises:
+        Exception: Gzip header check
+        Exception: _description_
+        Exception: CRC check
+        Exception: Decompressed size check
+
+    Returns:
+        _type_: _description_
+    """
+    logger = kwargs.get('logger', None)
+    # read first 18bytes
+    buf = handler.read(18)
+    while buf[0] != 31 or buf[1] != 192 or buf[2] != 8 or buf[3] != 4 or buf[12] != 66 or buf[13] != 67:
+        b_ = handler.read(1)
+        if len(b_) < 2:
+            raise Exception("file end")
+        buf = buf[1:] + b_ # scan next byte
+    gzheader = struct.unpack('<BBBBIBBHBBHH', buf)
+    xlen = gzheader[7]
+    block_size = gzheader[10]
+    if xlen >= 6 and block_size > xlen + 19:
+        _skip_bytes = xlen - 6
+        handler.read(_skip_bytes)
+    # if xlen > 65535:
+    #     raise Exception('GZBF block size exceeded {}'.format(xlen))
+    buf = handler.read(xlen)
+    si1, si2, slen, bsize = struct.unpack('<BBHH', buf[0:6])
+    compressed_data_size = block_size - xlen - 19
+    cdata = handler.read(compressed_data_size)
+
+    decobj = zlib.decompressobj(-15) # no header
+    uncompressed = decobj.decompress(compressed) + decobj.flush()
+
+    buf = handler.read(8)
+    crc32, input_size = struct.unpack('II', buf)
+    if input_size == len(uncompressed):
+        crc32_calc = zlib.crc32(uncompressed)
+        if crc32_calc != crc32:
+            raise Exception("inconsistent CRC32")
+        return uncompressed
+    else:
+        raise Exception("inconsistent block size")
+
+    
 # @numba.njit('void(u1[:],)')
 def read_next_block(handler, **kwargs):
     """Read BGZF block
@@ -84,6 +166,8 @@ def read_next_block(handler, **kwargs):
 
     # GZIP header, ID1=31, ID2=139
     buf = handler.read(2)
+    if len(buf) < 2:
+        raise Exception("file end")
     gzheader = struct.unpack('BB', buf)
     if gzheader[0] != 31 or gzheader[1] != 139:
         if logger:
@@ -97,8 +181,8 @@ def read_next_block(handler, **kwargs):
     buf = handler.read(10)
     values = struct.unpack('<BBIBBH', buf)
     xlen = values[-1]
-    if xlen > 65535:
-        raise Exception('GZBF block size exceeded {}'.format(xlen))
+    # if xlen > 65535:
+    #     raise Exception('GZBF block size exceeded {}'.format(xlen))
     buf = handler.read(xlen)
     si1, si2, slen, bsize = struct.unpack('<BBHH', buf[0:6])
     if si1 != 66 or si2 != 67:
@@ -143,7 +227,8 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
     fasta_mode = filename_fastq is None or re.search('\\.m?fa(\\.gz)?$', filename_fastq)
 
     if filename_fastq is None:
-        ostr = None
+        # ostr = None
+        ostr = sys.stdout
     elif filename_fastq.endswith('.gz'):                                                                                                                                                   
         n_threads = kwargs.get('threads', 4)
         ostr = io.TextIOWrapper(mgzip.open(filename_fastq, 'wb', thread=n_threads))
@@ -175,7 +260,7 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
             while l_text + 12 > len(data):
                 sys.stderr.write('reading remant header {}/{}\n'.format(len(data), l_text))
                 n_blocks += 1
-                data += read_next_block(fi)
+                data += scan_next_block(fi)
             text_ = data[8:8+l_text].decode('latin-1')
             pos = 8 + l_text
             # load references
@@ -194,8 +279,13 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
                 if pos > len(data): #
                     # logger.info('extend header block {} / {}'.format(pos, len(data)))
                     n_blocks += 1
-                    data += read_next_block(fi)
+                    data += scan_next_block(fi)
             info['references'] = references
+        except BAMException as e:
+            if e.kind == BAMException.FILE_END:
+                break
+            logger.warning('header was corrupted, skip header blocks')
+            n_malformed_gzip_blocks += 1
         except Exception as e:
             if not force_continuation:
                 raise
@@ -283,7 +373,7 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
                 scanning = False
                 pos += 36
                 seqid = data[pos:pos + l_read_name].decode('latin-1')[:-1]
-                pos += l_read_name
+                pos += l_read_name + n_cigar_op * 4
                 n_seqs += 1
 
                 if ostr:
@@ -396,7 +486,7 @@ def main():
     """
     parser = argparse.ArgumentParser()
     parser.add_argument('-i', '--input', nargs='+')
-    parser.add_argument('-o','--outdir', default='rescued')
+    parser.add_argument('-o','--outdir', default=None)
     parser.add_argument('--verbose', action='store_true')
     parser.add_argument('--mode', choices=['test', 'fasta', 'fasta.gz', 'fastq', 'fastq.gz', 'fa.gz', 'fa', 'fz', 'fq', 'fqz'], default='fastq.gz',
                         help='output mode (test:no output, fq/fastq:fastq fqz/fastq.gz/gzipped fastq, fa/fasta:fasta, fz:gzipped fasta)')
@@ -409,7 +499,8 @@ def main():
     args = parser.parse_args()
     outdir = args.outdir
     n_threads = args.p
-    os.makedirs(outdir, exist_ok=True)
+    if outdir:
+        os.makedirs(outdir, exist_ok=True)
     limit = args.limit
     filenames = args.input
     forced = args.ignore_corrupted
@@ -425,11 +516,11 @@ def main():
         'input':filenames,
         'files':[],
     }
-        
+
     for filename in filenames:
         if filename.endswith('.bam'):
             title = os.path.basename(filename)[0:-4]
-            if mode == 'test': # no output
+            if outdir is None or mode == 'test': # no output
                 filename_out = None
             elif fasta:
                 filename_out = os.path.join(outdir, title + '.fa')
@@ -439,10 +530,12 @@ def main():
                 filename_out += '.gz'
             finfo = retrieve_fastq_from_bam(filename, filename_out, logger=logger, limit=limit, forced=forced, threads=n_threads)
             info['files'].append(finfo)
-            
-    fn_info = os.path.join(outdir, 'run.info')
-    with open(fn_info, 'w') as fo:
-        json.dump(info, fo, indent=2)
+    if outdir is None:
+        print(json.dumps(info))
+    else:
+        fn_info = os.path.join(outdir, 'run.info')
+        with open(fn_info, 'w') as fo:
+            json.dump(info, fo, indent=2)
     
 if __name__ == '__main__':
     main()

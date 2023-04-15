@@ -21,4 +21,14 @@ pip install bamsalvage
 bamsalvage -i [FILE] -o {DIRECTORY] --mode [fa,fa.gz,fastq,fastq.gz] [--verbose]
 ```
 
+```
+Options:
+  -i, --input <FILE>     Input BAM file
+  -o, --output <FILE>    Output filename
+  -l, --limit <integer>  Limiting counts [default: 0]
+  --mode                 Output format (fa:fasta, fa.gz:gzipped fasta, fastq:fastq, fastq.gz(default):gzipped fastq)
+  -v, --verbose          verbosity
+  -h, --help             Print help
+  ```
+
 
