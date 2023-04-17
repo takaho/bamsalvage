@@ -14,7 +14,7 @@ class BAMException(Exception):
     CRC32_INCORRECT = 3
     FAILED_DECOMPRESSION = 4
     __KIND = ['End of file', 'No header found', 'Buffer size overflow', 'CRC32 was incorrect', 'Decompression failed']
-    def __init__(self, kind:int, message:string):
+    def __init__(self, kind:int, message:str):
         super(BAMException, self).__init__(message)
         self.__kind = max(0, min(4, kind))
     def __str__(self):
@@ -54,7 +54,7 @@ def scan_block_header(buffer:bytes, start:numba.int64)->numba.int64:
             return i
     return -1
 
-def get_logger(name=None, stdout=True, logfile=None):
+def _get_logger(name=None, stdout=True, logfile=None):
     if name is None:
         name = sys._getframe().f_code.co_name
         pass
@@ -283,8 +283,8 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
             info['references'] = references
         except BAMException as e:
             if e.kind == BAMException.FILE_END:
-                break
-            logger.warning('header was corrupted, skip header blocks')
+                return
+            logger.warning('header was corrupted, skip header blocks {}'.format(str(e)))
             n_malformed_gzip_blocks += 1
         except Exception as e:
             if not force_continuation:
@@ -478,8 +478,17 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
         'alignment':tracing_ptr[TRACE_ID_ALIGNMENT]}
 
     return info
-    
+
+# def convert_bam_to_seq(filename_input, outdir, **kwargs):
+#     verbose = kwarge.get('verbose', False)
+#     mode = kwargs.mode('mode', 'fastq.gz')
+#     limit = kwargs.get('limit', 0)
+#     n_proc = kwargs.get('n_proc', 4)
+#     stop_at_corruption = kwargs.get('stop', False)
+
 def main():
+    """Entry point of command "bamsalvage"
+    """
     """
     c, b, B, ?, h, H, i, I, l, L, q, Q: 1, 1, 1, 1, 2, 2, 4, 4, 8, 8, 8, 8
     e, f, d : float 2, 4, 8
@@ -501,6 +510,9 @@ def main():
     n_threads = args.p
     if outdir:
         os.makedirs(outdir, exist_ok=True)
+        stdout_mode = False
+    else:
+        stdout_mode = True
     limit = args.limit
     filenames = args.input
     forced = args.ignore_corrupted
@@ -508,7 +520,7 @@ def main():
     gzipped = mode in ('fz', 'fastq.gz', 'fqz', 'fasta.gz', 'fa.gz')
     fasta = mode in ('fa', 'fasta', 'fa.gz', 'fz')
 
-    logger = get_logger(os.path.basename(__file__))
+    logger = _get_logger(os.path.basename(__file__))
     if args.verbose:
         logger.setLevel(10)
     info = {
@@ -516,6 +528,9 @@ def main():
         'input':filenames,
         'files':[],
     }
+    
+    if filenames is None:
+        raise Exception('no BAM files given')
 
     for filename in filenames:
         if filename.endswith('.bam'):
@@ -526,7 +541,7 @@ def main():
                 filename_out = os.path.join(outdir, title + '.fa')
             else:
                 filename_out = os.path.join(outdir, title + '.fastq')
-            if gzipped:
+            if (not stdout_mode) and gzipped:
                 filename_out += '.gz'
             finfo = retrieve_fastq_from_bam(filename, filename_out, logger=logger, limit=limit, forced=forced, threads=n_threads)
             info['files'].append(finfo)
