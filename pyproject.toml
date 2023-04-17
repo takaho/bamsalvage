@@ -1,35 +1,6 @@
 [build-system]
-requires = ["hatchling", "setuptools", "wheel"]
+requires = ["hatchling"]
 build-backend = "hatchling.build"
-
-[tool.hatch]
-name="bamsalvage"
-version = "0.1.2"
-description = "Sequence salvaging script from corrupted BAM files"
-license = "MIT"
-authors = ["Takaho A. Endo<takaho.endo@gmail.com>"]
-classifiers = [
-    "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
-]
-source-dir = "src"
-entry-points = [
-    "bamsalvage = bamsalvage.bamsalvage:main",
-]
-
-[tool.hatch.build]
-include = ["src/bamsalvage/*.py", "/test"]
-exclude = ["poetry_pyproject.toml", "hatchling.toml"]
-only-packages = true
-sources=["src"]
-
-[tool.hatch.build.targets.bamsalvage]
-
-
-[tool.hatchling.scripts]
-bamsalvage = "bamsalvage.bamsalvage:main"
-
 
 [project]
 name = "bamsalvage"
@@ -46,19 +17,10 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
-dependencies = ["numpy>=1.17", "numba>=0.4"]
+dependencies = ["numpy", "numba"]
 
 [project.urls]
-Homepage = "https://github.com/takaho/bamsalvage"
+Homepage = "https://pypi.org/project/bamsalvage/"
 
-
-
-# [tool.hatchling.metadata]
-# name = "bamsalvage"
-# version = "0.1.1"
-# author = "Takaho A. Endo"
-# author_email= "takaho.endo@gmail.com"
-# description = "Sequence salvaging script from corrupted BAM files"
-# licence = "MIT"
-
-
+[tool.hatchling.script]
+bamsalvage="bamsalvage.main"
