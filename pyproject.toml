@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bamsalvage"
-version = "0.1.2"
+version = "0.1.2.2"
 authors = [
   { name="Example Author", email="author@example.com" },
 ]
@@ -23,4 +23,7 @@ dependencies = ["numpy", "numba"]
 Homepage = "https://pypi.org/project/bamsalvage/"
 
 [tool.hatchling.script]
-bamsalvage="bamsalvage.main"
+bamsalvage="bamsalvage:main"
+
+[project.scripts]
+bamsalvage="bamsalvage:main"

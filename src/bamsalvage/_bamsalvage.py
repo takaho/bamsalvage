@@ -505,7 +505,19 @@ def main():
     parser.add_argument('-p', type=int, default=4, metavar='number', help='Number of threads for gzip compression, this option is ignored if mode is not gzipped output')
     parser.add_argument('--ignore-corrupted', action='store_true')
     
-    args = parser.parse_args()
+    args, cmds = parser.parse_known_args()
+    if args.input is None:
+        bamfiles = []
+        for f in cmds:
+            if f.endswith('.bam') and os.path.exists(f):
+                bamfiles.append(f)
+        filenames = bamfiles
+    else:
+        filenames = args.input
+    if len(filenames) == 0:
+        parser.print_help(sys.stderr)
+        raise Exception('no BAM file specified')
+    
     outdir = args.outdir
     n_threads = args.p
     if outdir:
@@ -514,7 +526,6 @@ def main():
     else:
         stdout_mode = True
     limit = args.limit
-    filenames = args.input
     forced = args.ignore_corrupted
     mode = args.mode
     gzipped = mode in ('fz', 'fastq.gz', 'fqz', 'fasta.gz', 'fa.gz')
