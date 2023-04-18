@@ -17,11 +17,13 @@ class BAMException(Exception):
     BUFFER_TERMINATED = 5
     INCONSISTENT_CHECKSUM = 6
     INCONSISTENT_BLOCK_SIZE = 7
+    DECOMPRESSION_FAILURE = 8
     __KIND = ['This is not BAM file', 
               'Block was corrupted', 'Expected buffer size overflow',
               'Incorrect magic number', 'Incorrect GZIP magic number', 
               'Reached the end of file', 'Inconsistent CRC32 checksum',
-              'Decompressed buffer size was inconsisted with expected']
+              'Decompressed buffer size was inconsisted with expected',
+              "Failed to decompress"]
     def __init__(self, kind:int, message:str=''):
         super(BAMException, self).__init__(message)
         if kind < 0 or kind > len(BAMException.__KIND):
@@ -126,68 +128,114 @@ def scan_next_block(handler, **kwargs):
     Returns:
         _type_: _description_
     """
-    logger = kwargs.get('logger', None)
+    # logger = kwargs.get('logger', None)
     # read first 18bytes
+    current_pos = handler.tell()
     buf = handler.read(18)
     # print(handler.tell())
-    while buf[0] != 31 or buf[1] != 192 or buf[2] != 8 or buf[3] != 4 or buf[12] != 66 or buf[13] != 67:
+    while buf[0] != 31 or buf[1] != 139 or buf[2] != 8 or buf[3] != 4 or buf[12] != 66 or buf[13] != 67:
         # sys.stderr.write('\033[K{} {}\r'.format(handler.tell(), len(buf)))
         # print(struct.unpack('BBBBBBBBBBBBBBBBBB', buf))
         # print(handler.tell(), len(buf))
-        sys.stderr.write('\033[K{}\r'.format(handler.tell()))
-        buf = buf[1:] + handler.read(1)
-        if 1: continue
-        step = len(buf)
+        # sys.stderr.write('\033[K{}\n'.format(handler.tell()))
+        # buf = buf[1:] + handler.read(1)
+        # if 1: continue
+        #step = len(buf)
+        offset = False
+        # sys.stderr.write('\033[K{} {} {},{} {},{}\n'.format(handler.tell(), len(buf), buf[0], buf[1], buf[12], buf[13]))
         for i in range(1, 18):
+            # print(i, len(buf))
             if buf[i] == 31:
-                step = i
-                # print(buf)
-                sys.stderr.write('\033[K{} {} {},{}\r'.format(handler.tell(), len(buf), buf[i], buf[i+1] if i < 17 else '.'))
-                # print('')
+                offset = True
+                # print('31 detected at {}'.format(i), len(buf), len(buf[i:]), 18 - i)
+                # print(i, str([int(x_) for x_ in buf[i:]]))
+                buf = buf[i:] + handler.read(i)
+                # print(str([int(x_) for x_ in buf]))
+                # print(len(buf))
+                # if buf[0] == 31 and buf[1] == 139 and buf[2] == 8 and buf[3] == 4:
+                #     sys.stderr.write('\033[K{} {}/{} {}\n'.format(handler.tell(), i, len(buf), str([int(x_) for x_ in buf])))#, buf[0], buf[1], buf[12], buf[13]))
                 break
-        # print(step)
-        # step = _find_byte(buf, 31)
-        if step == len(buf):
-            # print(handler.tell())
+                # print(buf)
+                # print('')
+                # break
+        if not offset:
             buf = handler.read(18)
-        else:
-            # print(handler.tell(), step, buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8], buf[9], buf[10], buf[11], buf[12], buf[13])
-            buf = buf[step:18] + handler.read(step)
-            # print('<', buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8], buf[9], buf[10], buf[11], buf[12], buf[13])
-            # print(buf[0], buf[1], buf[2], buf[3], buf[12], buf[13]) 
-        if len(buf) < 18:
-            raise BAMException(BAMException.BUFFER_TERMINATED, 'cannot scan header anymore')
+        if len(buf) < 18: 
+            raise BAMException(BAMException.BUFFER_TERMINATED, 'cannot scan header anymore AT {} '.format(handler.tell()))
+            
+        # # print(step)
+        # # step = _find_byte(buf, 31)
+        # if step == len(buf):
+        #     # print(handler.tell())
+        #     buf = handler.read(18)
+        # else:
+        #     # print(handler.tell(), step, buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8], buf[9], buf[10], buf[11], buf[12], buf[13])
+        #     buf = buf[step:18] + handler.read(step)
+        #     # print('<', buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8], buf[9], buf[10], buf[11], buf[12], buf[13])
+        #     # print(buf[0], buf[1], buf[2], buf[3], buf[12], buf[13]) 
+        # if len(buf) < 18:
+        #     raise BAMException(BAMException.BUFFER_TERMINATED, 'cannot scan header anymore')
         # buf = buf[1:] + b_ # scan next byte
-    print(handler.tell())
-    exit()
     gzheader = struct.unpack('<BBBBIBBHBBHH', buf)
+    # print(gzheader)
     xlen = gzheader[7]
-    block_size = gzheader[10]
+    block_size = gzheader[11]
+    # print(xlen, block_size)
     if xlen >= 6 and block_size > xlen + 19:
         _skip_bytes = xlen - 6
         handler.read(_skip_bytes)
-    buf = handler.read(xlen)
+    # buf = handler.read(xlen)
     if len(buf) < xlen:
-        raise BAMException(BAMException.BUFFER_TERMINATED, 'cannot load gzipped block')
-    si1, si2, slen, bsize = struct.unpack('<BBHH', buf[0:6])
+        raise BAMException(BAMException.BUFFER_TERMINATED, 'cannot load gzipped block AT {} '.format(current_pos))
+    # si1, si2, slen, bsize = struct.unpack('<BBHH', buf[0:6])
     compressed_data_size = block_size - xlen - 19
+    return decompress_and_validate(handler, compressed_data_size)
+    # cdata = handler.read(compressed_data_size)
+
+    # decobj = zlib.decompressobj(-15) # no header
+    # try:
+    #     uncompressed = decobj.decompress(cdata) + decobj.flush()
+    # except Exception as e:
+    #     raise BAMException(BAMException.DECOMPRESSION_FAILURE, '{} AT {}'.format(str(e), current_pos))
+
+    # buf = handler.read(8)
+    # crc32, input_size = struct.unpack('<II', buf)
+    # if input_size == len(uncompressed):
+    #     crc32_calc = zlib.crc32(uncompressed)
+    #     if crc32_calc != crc32:            
+    #         raise BAMException(BAMException.INCONSISTENT_CHECKSUM, 'CRC is {:x} , not {:x}'.format(crc32_calc, crc32))
+    #     return uncompressed
+    # else:
+    #     # sys.stderr.write(f'inconsistent size of decompressed buffer {expected_size} / {len(data)}\n')
+    #     raise BAMException(BAMException.INCONSISTENT_BLOCK_SIZE, 
+    #                        'inconsistent zlib size expected={}, decompressed={}'.format(
+    #                             input_size, len(uncompressed)))
+
+def decompress_and_validate(handler, compressed_data_size):
+    current_pos = handler.tell()
     cdata = handler.read(compressed_data_size)
 
     decobj = zlib.decompressobj(-15) # no header
-    uncompressed = decobj.decompress(compressed) + decobj.flush()
+    try:
+        decompressed = decobj.decompress(cdata) + decobj.flush()
+    except Exception as e:
+        raise BAMException(BAMException.DECOMPRESSION_FAILURE, '{} AT {} '.format(str(e), current_pos))
 
     buf = handler.read(8)
+    if len(buf) < 8:
+        raise BAMException(BAMException.BUFFER_TERMINATED, ' AT {} '.format(current_pos))
     crc32, input_size = struct.unpack('<II', buf)
-    if input_size == len(uncompressed):
-        crc32_calc = zlib.crc32(uncompressed)
+    if input_size == len(decompressed):
+        crc32_calc = zlib.crc32(decompressed)
         if crc32_calc != crc32:            
-            raise BAMException(BAMException.INCONSISTENT_CHECKSUM, 'CRC is {:x} , not {:x}'.format(crc32_calc, crc32))
-        return uncompressed
+            raise BAMException(BAMException.INCONSISTENT_CHECKSUM, 'CRC is {:x} , not {:x} AT {} '.format(crc32_calc, crc32, current_pos))
+        return decompressed
     else:
         # sys.stderr.write(f'inconsistent size of decompressed buffer {expected_size} / {len(data)}\n')
         raise BAMException(BAMException.INCONSISTENT_BLOCK_SIZE, 
-                           'inconsistent zlib size expected={}, decompressed={}'.format(
-                                input_size, len(uncompressed)))
+                           'inconsistent zlib size expected={}, decompressed={} AT {} '.format(
+                                input_size, len(decompressed), current_pos))
+    return decompressed
     
 def read_next_block(handler, **kwargs):
     """Read BGZF block, block corruption is not assumed.
@@ -215,22 +263,23 @@ def read_next_block(handler, **kwargs):
     if si1 != 66 or si2 != 67:
         raise BAMException(BAMException.INCORRECT_GZIP_MAGIC_NUMBER, 'SI1={}, SI2={} is different from 66 and 67'.format(si1, si2))
     decobj = zlib.decompressobj(-15) # no header
-    compressed = handler.read(bsize - xlen - 19)
-    expected_crc, expected_size = struct.unpack('<II', handler.read(8))
-    decompressed = decobj.decompress(compressed) + decobj.flush()
+    return decompress_and_validate(handler, bsize - xlen - 19)
+    # compressed = handler.read(bsize - xlen - 19)
+    # expected_crc, expected_size = struct.unpack('<II', handler.read(8))
+    # decompressed = decobj.decompress(compressed) + decobj.flush()
 
-    # CRC check
-    crc_calc = struct.unpack('<I', decompressed[0:4])[0]#zlib.crc32(data))[0]
+    # # CRC check
+    # crc_calc = struct.unpack('<I', decompressed[0:4])[0]#zlib.crc32(data))[0]
 
-    if expected_size == len(decompressed):
-        calculated_crc32 = zlib.crc32(decompressed)
-        if calculated_crc32 != expected_crc:
-            raise BAMException(BAMException.INCONSISTENT_CHECKSUM, 'CRC is {:x} , not {:x}'.format(calculated_crc, expected_crc))
-        return decompressed
-    else:
-        raise BAMException(BAMException.INCONSISTENT_BLOCK_SIZE, 
-                           'inconsistent zlib size expected={}, decompressed={}'.format(
-                                expected_size, len(decompressed)))
+    # if expected_size == len(decompressed):
+    #     calculated_crc32 = zlib.crc32(decompressed)
+    #     if calculated_crc32 != expected_crc:
+    #         raise BAMException(BAMException.INCONSISTENT_CHECKSUM, 'CRC is {:x} , not {:x}'.format(calculated_crc, expected_crc))
+    #     return decompressed
+    # else:
+    #     raise BAMException(BAMException.INCONSISTENT_BLOCK_SIZE, 
+    #                        'inconsistent zlib size expected={}, decompressed={}'.format(
+    #                             expected_size, len(decompressed)))
 
 def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dict:
     """Retrieving fastq sequences from BAM file
@@ -259,11 +308,13 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
         ostr = open(filename_fastq, 'w')
     
     filesize = os.path.getsize(filename_bam)
-    TRACE_ID_READING = 0
-    TRACE_ID_ALIGNMENT = 1
-    tracing_situations = [TRACE_ID_READING, TRACE_ID_ALIGNMENT]
-    tracing_ptr = [-1] * (max(tracing_situations) + 1)
+    # TRACE_ID_READING = 0
+    # TRACE_ID_ALIGNMENT = 1
+    # tracing_situations = [TRACE_ID_READING, TRACE_ID_ALIGNMENT]
+    # tracing_ptr = [-1] * (max(tracing_situations) + 1)
 
+    MAXIMUM_BLOCK_SIZE = 1024 * 1024
+    MINIMUM_READ_NAME = 2
     with open(filename_bam, 'rb') as fi:
         references = []
         n_blocks = 0
@@ -281,7 +332,7 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
                 raise Exception('the file is not BAM')
             l_text = struct.unpack('<I', data[4:8])[0]
             while l_text + 12 > len(data):
-                sys.stderr.write('reading remant header {}/{}\n'.format(len(data), l_text))
+                logger.info('reading remant header {}/{}\n'.format(len(data), l_text))
                 n_blocks += 1
                 data += scan_next_block(fi)
             text_ = data[8:8+l_text].decode('latin-1')
@@ -308,6 +359,8 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
             if e.kind == BAMException.BUFFER_TERMINATED: # end of file
                 logger.warning('no header and file terminated')
                 return
+            else:
+                logger.warning(str(e))
             # logger.warning('header was corrupted, skip header blocks {}'.format(str(e)))
             n_malformed_gzip_blocks += 1
         except Exception as e:
@@ -323,7 +376,10 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
         keep_running = True
         scanning = False
         data = []
-        fi.seek(filesize // 20)
+        # fi.seek(6485931845)
+        # fi.seek(5547475047)
+        # fi.seek(64501288359)
+        scanning = True
         
         # scanning = True
         while keep_running:
@@ -342,13 +398,13 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
                 n_malformed_gzip_blocks += 1
                 # sys.stderr.write('block {} ({:.1f}% in all) was corrupted.\n'.format(n_blocks, n_corrupted_blocks * 100. / n_blocks))
                 scanning = True
-                tracing_ptr[TRACE_ID_READING] = file_ptr
+                # tracing_ptr[TRACE_ID_READING] = file_ptr
                 pos = 0
                 # print(fi.tell())
                 continue
             except:
                 # print(file_ptr)
-                tracing_ptr[TRACE_ID_READING] = file_ptr
+                # tracing_ptr[TRACE_ID_READING] = file_ptr
                 # if not force_continuation:
                 #     raise
                 n_malformed_gzip_blocks += 1
@@ -368,7 +424,6 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
                 
             # read data until the end of block
             while pos < len(data):
-                # print(pos, len(data))
                 file_ptr = fi.tell()
                 if file_ptr >= filesize: # check position is in the file size
                     break
@@ -379,29 +434,34 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
                     = struct.unpack('<IiiBBHHHIiii', data[pos:pos + 36])
                 ptr_block_start = pos + 4 # start position of data field
                 
-                # read data block
-                while block_size + ptr_block_start >= len(data):
-                    # logger.info('extending alignment block to {} (current {})'.format(block_size, len(data) - pos))
-                    try:
-                        n_blocks += 1
-                        data += read_next_block(fi)
-                    except BAMException as e:
-                        tracing_ptr[TRACE_ID_READING] = file_ptr
-                        n_malformed_gzip_blocks += 1
-                        sys.stderr.write(str(e) + '\n')
-                        logger.warning('\033[Kfailed to loading : {}'.format(str(e)))
-                        data = []
+                # print(block_size, l_read_name, l_seq)
+                if block_size > MAXIMUM_BLOCK_SIZE or l_read_name < MINIMUM_READ_NAME:
+                    block_size = 0
+                else:
+                    # read data block
+                    while block_size + ptr_block_start >= len(data):
+                        # print(block_size + ptr_block_start, len(data), fi.tell())
+                        # logger.info('extending alignment block to {} (current {})'.format(block_size, len(data) - pos))
+                        try:
+                            n_blocks += 1
+                            data += read_next_block(fi)
+                        except BAMException as e:
+                            # tracing_ptr[TRACE_ID_READING] = file_ptr
+                            n_malformed_gzip_blocks += 1
+                            # sys.stderr.write(str(e) + '\n')
+                            logger.warning('\033[Kfailed to loading : {}'.format(str(e)))
+                            data = []
+                            break
+                        except Exception as e:
+                            raise
+                    if len(data) == 0: # skip blocks
+                        scanning = True
                         break
-                    except Exception as e:
-                        raise
-                if len(data) == 0: # skip blocks
-                    scanning = True
-                    break
                     
                 # assert variable range
                 if l_seq >= block_size * 3 // 2 or l_read_name < 5 or refid < -2 or refid >= len(references): # invalid block
                     n_unaligned_blocks += 1
-                    tracing_ptr[TRACE_ID_ALIGNMENT] = file_ptr
+                    # tracing_ptr[TRACE_ID_ALIGNMENT] = file_ptr
                     scanning = True
                     data = []
                     pos = 0
@@ -503,7 +563,7 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
                         # raise Exception('invalid value type character {} at {} / {}'.format(ord(val_type), pos, len(data)))
                         break
                     pass
-    if ostr:
+    if ostr is not sys.stdout:
         ostr.close()
     sys.stderr.write('\033[K\r')
     info['n_seqs'] = n_seqs
@@ -514,9 +574,9 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
     info['total_bases'] = total_bases
 
     # info['traces'] = {'':tracking
-    info['tracing'] = {
-        'reading':tracing_ptr[TRACE_ID_READING],
-        'alignment':tracing_ptr[TRACE_ID_ALIGNMENT]}
+    # info['tracing'] = {
+    #     'reading':tracing_ptr[TRACE_ID_READING],
+    #     'alignment':tracing_ptr[TRACE_ID_ALIGNMENT]}
 
     return info
 
