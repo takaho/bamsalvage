@@ -1,4 +1,4 @@
-import os, sys, re, io
+seeimport os, sys, re, io
 import argparse, struct
 import mgzip, gzip
 import zlib, logging, json
@@ -132,84 +132,28 @@ def scan_next_block(handler, **kwargs):
     # read first 18bytes
     current_pos = handler.tell()
     buf = handler.read(18)
-    # print(handler.tell())
     while buf[0] != 31 or buf[1] != 139 or buf[2] != 8 or buf[3] != 4 or buf[12] != 66 or buf[13] != 67:
-        # sys.stderr.write('\033[K{} {}\r'.format(handler.tell(), len(buf)))
-        # print(struct.unpack('BBBBBBBBBBBBBBBBBB', buf))
-        # print(handler.tell(), len(buf))
-        # sys.stderr.write('\033[K{}\n'.format(handler.tell()))
-        # buf = buf[1:] + handler.read(1)
-        # if 1: continue
-        #step = len(buf)
         offset = False
-        # sys.stderr.write('\033[K{} {} {},{} {},{}\n'.format(handler.tell(), len(buf), buf[0], buf[1], buf[12], buf[13]))
         for i in range(1, 18):
-            # print(i, len(buf))
             if buf[i] == 31:
                 offset = True
-                # print('31 detected at {}'.format(i), len(buf), len(buf[i:]), 18 - i)
-                # print(i, str([int(x_) for x_ in buf[i:]]))
                 buf = buf[i:] + handler.read(i)
-                # print(str([int(x_) for x_ in buf]))
-                # print(len(buf))
-                # if buf[0] == 31 and buf[1] == 139 and buf[2] == 8 and buf[3] == 4:
-                #     sys.stderr.write('\033[K{} {}/{} {}\n'.format(handler.tell(), i, len(buf), str([int(x_) for x_ in buf])))#, buf[0], buf[1], buf[12], buf[13]))
                 break
-                # print(buf)
-                # print('')
-                # break
         if not offset:
             buf = handler.read(18)
         if len(buf) < 18: 
             raise BAMException(BAMException.BUFFER_TERMINATED, 'cannot scan header anymore AT {} '.format(handler.tell()))
             
-        # # print(step)
-        # # step = _find_byte(buf, 31)
-        # if step == len(buf):
-        #     # print(handler.tell())
-        #     buf = handler.read(18)
-        # else:
-        #     # print(handler.tell(), step, buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8], buf[9], buf[10], buf[11], buf[12], buf[13])
-        #     buf = buf[step:18] + handler.read(step)
-        #     # print('<', buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8], buf[9], buf[10], buf[11], buf[12], buf[13])
-        #     # print(buf[0], buf[1], buf[2], buf[3], buf[12], buf[13]) 
-        # if len(buf) < 18:
-        #     raise BAMException(BAMException.BUFFER_TERMINATED, 'cannot scan header anymore')
-        # buf = buf[1:] + b_ # scan next byte
     gzheader = struct.unpack('<BBBBIBBHBBHH', buf)
-    # print(gzheader)
     xlen = gzheader[7]
     block_size = gzheader[11]
-    # print(xlen, block_size)
     if xlen >= 6 and block_size > xlen + 19:
         _skip_bytes = xlen - 6
         handler.read(_skip_bytes)
-    # buf = handler.read(xlen)
     if len(buf) < xlen:
         raise BAMException(BAMException.BUFFER_TERMINATED, 'cannot load gzipped block AT {} '.format(current_pos))
-    # si1, si2, slen, bsize = struct.unpack('<BBHH', buf[0:6])
     compressed_data_size = block_size - xlen - 19
     return decompress_and_validate(handler, compressed_data_size)
-    # cdata = handler.read(compressed_data_size)
-
-    # decobj = zlib.decompressobj(-15) # no header
-    # try:
-    #     uncompressed = decobj.decompress(cdata) + decobj.flush()
-    # except Exception as e:
-    #     raise BAMException(BAMException.DECOMPRESSION_FAILURE, '{} AT {}'.format(str(e), current_pos))
-
-    # buf = handler.read(8)
-    # crc32, input_size = struct.unpack('<II', buf)
-    # if input_size == len(uncompressed):
-    #     crc32_calc = zlib.crc32(uncompressed)
-    #     if crc32_calc != crc32:            
-    #         raise BAMException(BAMException.INCONSISTENT_CHECKSUM, 'CRC is {:x} , not {:x}'.format(crc32_calc, crc32))
-    #     return uncompressed
-    # else:
-    #     # sys.stderr.write(f'inconsistent size of decompressed buffer {expected_size} / {len(data)}\n')
-    #     raise BAMException(BAMException.INCONSISTENT_BLOCK_SIZE, 
-    #                        'inconsistent zlib size expected={}, decompressed={}'.format(
-    #                             input_size, len(uncompressed)))
 
 def decompress_and_validate(handler, compressed_data_size):
     current_pos = handler.tell()
@@ -295,6 +239,7 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
     info = {'input':filename_bam, 'output':filename_fastq}
     # force_continuation = kwargs.get('forced', False)
     limit = kwargs.get('limit', 0)
+    seek_pos = kwargs.get('fileseek', 0)
 
     fasta_mode = filename_fastq is None or re.search('\\.m?fa(\\.gz)?$', filename_fastq)
 
@@ -306,6 +251,10 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
         ostr = io.TextIOWrapper(mgzip.open(filename_fastq, 'wb', thread=n_threads))
     else:
         ostr = open(filename_fastq, 'w')
+        
+    if seek_pos > 0:
+        logger.info('seek at {:.0}'.format(seek_pos * filesize))
+        fi.seek(int(seek_pos * filesize))
     
     filesize = os.path.getsize(filename_bam)
     # TRACE_ID_READING = 0
@@ -376,9 +325,6 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
         keep_running = True
         scanning = False
         data = []
-        # fi.seek(6485931845)
-        # fi.seek(5547475047)
-        # fi.seek(64501288359)
         scanning = True
         
         # scanning = True
@@ -396,19 +342,11 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
             except BAMException as e:
                 logger.warning(str(e))
                 n_malformed_gzip_blocks += 1
-                # sys.stderr.write('block {} ({:.1f}% in all) was corrupted.\n'.format(n_blocks, n_corrupted_blocks * 100. / n_blocks))
                 scanning = True
-                # tracing_ptr[TRACE_ID_READING] = file_ptr
                 pos = 0
-                # print(fi.tell())
                 continue
             except:
-                # print(file_ptr)
-                # tracing_ptr[TRACE_ID_READING] = file_ptr
-                # if not force_continuation:
-                #     raise
                 n_malformed_gzip_blocks += 1
-                # sys.stderr.write('block {} ({:.1f}% in all) was corrupted.\n'.format(n_blocks, n_corrupted_blocks * 100. / n_blocks))
                 scanning = True
                 raise
             pos = 0
@@ -597,14 +535,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-i', '--input', nargs='+')
     parser.add_argument('-o','--outdir', default=None)
+    parser.add_argument('--seek', default=0, type=int, help='seek position, start from given position by percent(0-100, default 0)')
     parser.add_argument('--verbose', action='store_true')
     parser.add_argument('--mode', choices=['test', 'fasta', 'fasta.gz', 'fastq', 'fastq.gz', 'fa.gz', 'fa', 'fz', 'fq', 'fqz'], default='fastq.gz',
                         help='output mode (test:no output, fq/fastq:fastq fqz/fastq.gz/gzipped fastq, fa/fasta:fasta, fz:gzipped fasta)')
-    # parser.add_argument('--fasta', action='store_true')
-    # parser.add_argument('--gzip', action='store_true', help='compress output file')
     parser.add_argument('--limit', type=int, default=0)
     parser.add_argument('-p', type=int, default=4, metavar='number', help='Number of threads for gzip compression, this option is ignored if mode is not gzipped output')
-    # parser.add_argument('--ignore-corrupted', action='store_true')
     
     args, cmds = parser.parse_known_args()
     if args.input is None:
@@ -621,13 +557,13 @@ def main():
     
     outdir = args.outdir
     n_threads = args.p
+    seek_pos = args.seek
     if outdir:
         os.makedirs(outdir, exist_ok=True)
         stdout_mode = False
     else:
         stdout_mode = True
     limit = args.limit
-    #forced = args.ignore_corrupted
     mode = args.mode
     gzipped = mode in ('fz', 'fastq.gz', 'fqz', 'fasta.gz', 'fa.gz')
     fasta = mode in ('fa', 'fasta', 'fa.gz', 'fz')
@@ -655,7 +591,7 @@ def main():
                 filename_out = os.path.join(outdir, title + '.fastq')
             if (not stdout_mode) and gzipped:
                 filename_out += '.gz'
-            finfo = retrieve_fastq_from_bam(filename, filename_out, logger=logger, limit=limit, threads=n_threads)
+            finfo = retrieve_fastq_from_bam(filename, filename_out, logger=logger, limit=limit, threads=n_threads, fileseek=seek_pos)
             info['files'].append(finfo)
     if outdir is None:
         print(json.dumps(info))
