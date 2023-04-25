@@ -7,7 +7,7 @@ from bamsalvage._bamsalvage import *
 try:
     __version__ = version(__name__)
 except Exception:
-    __version__="0.1.4"
+    __version__="0.1.5"
     pass
 
 # from _bamsalvage import *

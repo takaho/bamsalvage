@@ -5,6 +5,9 @@ import zlib, logging, json
 import numba
 import numpy as np
 
+def version():
+    return "0.1.5"
+
 # Error handling
 class BAMException(Exception):
     """Exception for BAM decoding
@@ -78,13 +81,6 @@ def scan_block_header(buffer:bytes, start:numba.int64)->numba.int64:
         if 0 <= l_seq < block_size * 3 // 2 and l_read_name > 4 and -1 <= refid < 200 and block_size + start < len(buffer):
             return i
     return -1
-
-# @numba.njit('i8(u8[:], u8)', cache=True)
-# def _find_byte(bytes, byte):
-#     for i in range(bytes.size):
-#         if bytes[i] == byte:
-#             return i
-#     return len(bytes)
 
 def _get_logger(name=None, stdout=True, logfile=None):
     if name is None:
@@ -259,11 +255,7 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
         ostr = open(filename_fastq, 'w')
         
     filesize = os.path.getsize(filename_bam)
-    tracking_data = []
-    # TRACE_ID_READING = 0
-    # TRACE_ID_ALIGNMENT = 1
-    # tracing_situations = [TRACE_ID_READING, TRACE_ID_ALIGNMENT]
-    # tracing_ptr = [-1] * (max(tracing_situations) + 1)
+    tracking_data = [] # remember error positions
 
     MAXIMUM_BLOCK_SIZE = 1024 * 1024
     MINIMUM_READ_NAME = 2
@@ -275,7 +267,6 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
         references = []
         n_blocks = 0
         pos = 0
-        # n_corrupted_blocks = 0
         n_malformed_gzip_blocks = 0
         n_unaligned_blocks = 0
         
@@ -323,8 +314,6 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
                 # logger.warning('header was corrupted, skip header blocks {}'.format(str(e)))
                 n_malformed_gzip_blocks += 1
             except Exception as e:
-                # if not force_continuation:
-                #     raise
                 tracking_data.append([-2, file_ptr])
                 logger.warning('header was corrupted, skip header blocks')
                 n_malformed_gzip_blocks += 1
@@ -334,11 +323,8 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
         n_seqs = 0
         total_bases = 0
         keep_running = True
-#        scanning = False
         data = []
-        # scanning = True
         
-        # scanning = True
         while keep_running:
             # first block after buffer flushing
             file_ptr = fi.tell()
@@ -355,25 +341,14 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
                 logger.warning(str(e))
                 n_malformed_gzip_blocks += 1
                 tracking_data.append([e.kind, file_ptr])
-                # scanning = True
                 pos = 0
                 continue
             except:
                 n_malformed_gzip_blocks += 1
                 tracking_data.append([-2, file_ptr])
-                # scanning = True
                 raise
             pos = 0
             
-            # if scanning:
-            #     sys.stderr.write('\033[Kscanning {}, {}, {}\r\n'.format(n_blocks, len(data), pos))
-            #     pos_scanned = scan_block_header(data, pos)
-            #     if pos_scanned >= 0:
-            #         pos = pos_scanned
-            #         scanning = False
-            #     else:
-            #         continue
-                
             # read data until the end of block
             while pos < len(data):
                 file_ptr = fi.tell()
@@ -413,10 +388,8 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
                             n_blocks += 1
                             data += read_next_block(fi)
                         except BAMException as e:
-                            # tracing_ptr[TRACE_ID_READING] = file_ptr
                             tracking_data.append([e.kind, file_ptr])
                             n_malformed_gzip_blocks += 1
-                            # sys.stderr.write(str(e) + '\n')
                             logger.warning('\033[Kfailed to loading : {}'.format(str(e)))
                             data = []
                             break
@@ -424,12 +397,10 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
                             tracking_data.append([-1, file_ptr])
                             raise
                     if len(data) == 0: # skip blocks
-                        # scanning = True
                         break
                     
                 # logger.info(f'pos={pos}/{len(data)}\tname={l_read_name}, l_seq={l_seq}, refid={refid}, pos={mappos}, MAPQ={mapq}, bin={bai_bin}, n_cigar={n_cigar_op}, flag={flag}')
                 #bases = '=ACMGRSVTWYHKDBN'
-                # scanning = False
                 pos += 36
                 seqid = data[pos:pos + l_read_name].decode('latin-1')[:-1]
                 pos += l_read_name + n_cigar_op * 4
@@ -440,7 +411,6 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
                     if fasta_mode:
                         sequence = bytearray(l_seq)
                         convert_bytes_to_seq(data, pos, l_seq, sequence)
-                        # seq_ = sequence.decode('ascii')
                         ostr.write('>{}\n{}\n'.format(seqid, sequence.decode('ascii')))
                     else:
                         sequence = bytearray(l_seq)
@@ -534,11 +504,6 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
     info['total_bases'] = total_bases
     info['error.log'] = tracking_data
 
-    # info['traces'] = {'':tracking
-    # info['tracing'] = {
-    #     'reading':tracing_ptr[TRACE_ID_READING],
-    #     'alignment':tracing_ptr[TRACE_ID_ALIGNMENT]}
-
     return info
 
 # def convert_bam_to_seq(filename_input, outdir, **kwargs):
@@ -563,9 +528,13 @@ def main():
     parser.add_argument('--mode', choices=['test', 'fasta', 'fasta.gz', 'fastq', 'fastq.gz', 'fa.gz', 'fa', 'fz', 'fq', 'fqz'], default='fastq.gz',
                         help='output mode (test:no output, fq/fastq:fastq fqz/fastq.gz/gzipped fastq, fa/fasta:fasta, fz:gzipped fasta)')
     parser.add_argument('--limit', type=int, default=0)
+    parser.add_argument('-V', '--version', action='store_true', help='Show current version')
     parser.add_argument('-p', type=int, default=4, metavar='number', help='Number of threads for gzip compression, this option is ignored if mode is not gzipped output')
     
     args, cmds = parser.parse_known_args()
+    if args.version:
+        print(version())
+        exit()
     if args.input is None:
         bamfiles = []
         for f in cmds:
@@ -615,14 +584,16 @@ def main():
             if (not stdout_mode) and gzipped:
                 filename_out += '.gz'
             finfo = retrieve_fastq_from_bam(filename, filename_out, logger=logger, limit=limit, threads=n_threads, fileseek=seek_pos)
+            # output error log
             tracking_data = finfo.pop('error.log', [])
-            filename_log = os.path.join(outdir, '.{}.log'.format(os.path.basename(filename)))
-            with open(filename_log, 'w') as fo:
-                fo.write('#filename={}\n'.format(filename))
-                fo.write('#filesize={}\n'.format(os.path.getsize(filename)))
-                fo.write('#code\tfile_pos\tkind\n')
-                for kind, pos in tracking_data:
-                    fo.write('{}\t{}\t{}\n'.format(kind, pos, BAMException.resolve_error_code(kind)))
+            if outdir is not None:
+                filename_log = os.path.join(outdir, '.{}.log'.format(os.path.basename(filename)))
+                with open(filename_log, 'w') as fo:
+                    fo.write('#filename={}\n'.format(filename))
+                    fo.write('#filesize={}\n'.format(os.path.getsize(filename)))
+                    fo.write('#code\tfile_pos\tkind\n')
+                    for kind, pos in tracking_data:
+                        fo.write('{}\t{}\t{}\n'.format(kind, pos, BAMException.resolve_error_code(kind)))
             info['files'].append(finfo)
     if outdir is None:
         print(json.dumps(info))
