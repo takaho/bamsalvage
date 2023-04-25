@@ -29,4 +29,5 @@ bamsalvage="bamsalvage:main"
 bamsalvage="bamsalvage:main"
 
 [tool.hatch.build]
-exclude = ["outputs", "old"]
+exclude = ["outputs/*", "old/*", "log.txt", "monitor/*"]
+
