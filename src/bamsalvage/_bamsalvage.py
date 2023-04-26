@@ -6,7 +6,8 @@ import numba
 import numpy as np
 
 def version():
-    return "0.1.5"
+    import bamsalvage
+    return bamsalvage.__version__
 
 # Error handling
 class BAMException(Exception):
@@ -22,12 +23,14 @@ class BAMException(Exception):
     INCONSISTENT_BLOCK_SIZE = 7
     DECOMPRESSION_FAILURE = 8
     OUT_OF_RANGE_VARIABLES = 9
+    NEGATIVE_DATA_SIZE = 10
     __KIND = ['This is not BAM file', 
               'Block was corrupted', 'Expected buffer size overflow',
               'Incorrect magic number', 'Incorrect GZIP magic number', 
               'Reached the end of file', 'Inconsistent CRC32 checksum',
               'Decompressed buffer size was inconsisted with expected',
-              "Failed to decompress", 'Variables are out of range']
+              "Failed to decompress", 'Variables are out of range',
+              'Negative data size was given']
     def __init__(self, kind:int, message:str=''):
         super(BAMException, self).__init__(message)
         if kind < 0 or kind > len(BAMException.__KIND):
@@ -66,7 +69,7 @@ def convert_bytes_to_seq(buffer:bytes, start:int, l_seq:int, text:bytearray):
 def convert_bytes_to_qual(buffer:bytes, start:int, l_seq:int, text:bytearray):
     """Convert byte array into QUAL sequence"""
     for i in range(l_seq):
-        text[i] = min(33 + buffer[start+i], 127)
+        text[i] = min(33 + buffer[start+i], 126)
 
 @numba.njit(cache=True)
 def scan_block_header(buffer:bytes, start:numba.int64)->numba.int64:
@@ -128,16 +131,15 @@ def scan_next_block(handler, **kwargs):
 
     Args:
         handler (_io.TextIOWrapper): File handler
-        logger : logging.StreamHandler
+        strict : Check block size and CRC32
 
     Raises:
         BamException: BAM processing error
     Returns:
         _type_: _description_
     """
-    # logger = kwargs.get('logger', None)
-    # read first 18bytes
     current_pos = handler.tell()
+    strict_mode = kwargs.get('strict', False)
     buf = handler.read(18)
     while buf[0] != 31 or buf[1] != 139 or buf[2] != 8 or buf[3] != 4 or buf[12] != 66 or buf[13] != 67:
         offset = False
@@ -160,7 +162,7 @@ def scan_next_block(handler, **kwargs):
     if len(buf) < xlen:
         raise BAMException(BAMException.BUFFER_TERMINATED, 'cannot load gzipped block AT {} '.format(current_pos))
     compressed_data_size = block_size - xlen - 19
-    return decompress_and_validate(handler, compressed_data_size)
+    return decompress_and_validate(handler, compressed_data_size, strict_mode)
 
     
 def read_next_block(handler, **kwargs):
@@ -168,6 +170,7 @@ def read_next_block(handler, **kwargs):
 
     Args:
         handler (_io.TextIOWrapper): File handler
+        strict (bool) : Check block size and CRC32
 
     Raises:
         BamException: BAM processing error
@@ -175,6 +178,7 @@ def read_next_block(handler, **kwargs):
         _type_: _description_
     """
     # GZIP header, ID1=31, ID2=139
+    strict_mode = kwargs.get('strict', False)
     buf = handler.read(2)
     if len(buf) < 2:
         raise BAMException(BAMException.BUFFER_TERMINATED, 'cannot scan header anymore')
@@ -188,14 +192,15 @@ def read_next_block(handler, **kwargs):
     si1, si2, slen, bsize = struct.unpack('<BBHH', buf[0:6])
     if si1 != 66 or si2 != 67:
         raise BAMException(BAMException.INCORRECT_GZIP_MAGIC_NUMBER, 'SI1={}, SI2={} is different from 66 and 67'.format(si1, si2))
-    return decompress_and_validate(handler, bsize - xlen - 19)
+    return decompress_and_validate(handler, bsize - xlen - 19, strict_mode)
 
-def decompress_and_validate(handler, compressed_data_size):
+def decompress_and_validate(handler, compressed_data_size, strict_mode=False):
     """Read data block and validate BGZF block. Common routine among read_next_block and scan_next_block functions.
 
     Args:
         handler (stream): Stream handler
-        compressed_data_size (_type_): _description_
+        compressed_data_size (int64): Data size
+        strict : Check block size and CRC32
 
     Raises:
         BAMException: Corrupted block detected
@@ -203,6 +208,8 @@ def decompress_and_validate(handler, compressed_data_size):
     Returns:
         byte array : data block
     """
+    if compressed_data_size < 0:
+        raise BAMException(BAMException.NEGATIVE_DATA_SIZE, ' AT {} '.format(handler.tell()))
     current_pos = handler.tell()
     cdata = handler.read(compressed_data_size)
 
@@ -216,6 +223,9 @@ def decompress_and_validate(handler, compressed_data_size):
     if len(buf) < 8:
         raise BAMException(BAMException.BUFFER_TERMINATED, ' AT {} '.format(current_pos))
     crc32, input_size = struct.unpack('<II', buf)
+    if not strict_mode:
+        if 0 < len(decompressed) <= 65535:
+            return decompressed
     if input_size == len(decompressed):
         crc32_calc = zlib.crc32(decompressed)
         if crc32_calc != crc32:            
@@ -237,11 +247,21 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
     Returns:
         dict: information of results
     """
-    logger =kwargs.get('logger', logging.getLogger())
+    verbose = kwargs.get('verbose', False)
+    logger = kwargs.get('logger', None)
+    if logger is None:
+        if verbose:
+            logger = _get_logger('')
+        else:
+            logger = logging.getLogger()
+    if verbose:
+        logger.setLevel(logging.DEBUG)
+#    logger =kwargs.get('logger', logging.getLogger())
     info = {'input':filename_bam, 'output':filename_fastq}
     # force_continuation = kwargs.get('forced', False)
     limit = kwargs.get('limit', 0)
     seek_pos = kwargs.get('fileseek', 0)
+    strict_mode = kwargs.get('strict', False) # check block size and CRC32
 
     fasta_mode = filename_fastq is None or re.search('\\.m?fa(\\.gz)?$', filename_fastq)
 
@@ -275,7 +295,7 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
             file_ptr = 0 # pointer of file for backtracking
             try:
                 n_blocks += 1
-                data = read_next_block(fi)
+                data = read_next_block(fi, strict=strict_mode)
                 if data[0:4] != b'BAM\1':
                     logger.warning('BAM header lost\n')
                     raise Exception('the file is not BAM')
@@ -283,7 +303,7 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
                 while l_text + 12 > len(data):
                     logger.info('reading remant header {}/{}\n'.format(len(data), l_text))
                     n_blocks += 1
-                    data += scan_next_block(fi)
+                    data += scan_next_block(fi, strict=strict_mode)
                 text_ = data[8:8+l_text].decode('latin-1')
                 pos = 8 + l_text
                 # load references
@@ -302,20 +322,20 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
                     if pos > len(data): #
                         # logger.info('extend header block {} / {}'.format(pos, len(data)))
                         n_blocks += 1
-                        data += scan_next_block(fi)
+                        data += scan_next_block(fi, strict=strict_mode)
                 info['references'] = references
             except BAMException as e:
                 if e.kind == BAMException.BUFFER_TERMINATED: # end of file
-                    logger.warning('no header and file terminated')
+                    logger.info('no header and file terminated')
                     return
                 else:
-                    logger.warning(str(e))
+                    logger.info(str(e))
                 tracking_data.append([e.kind, file_ptr])
                 # logger.warning('header was corrupted, skip header blocks {}'.format(str(e)))
                 n_malformed_gzip_blocks += 1
             except Exception as e:
                 tracking_data.append([-2, file_ptr])
-                logger.warning('header was corrupted, skip header blocks')
+                logger.info('header was corrupted, skip header blocks')
                 n_malformed_gzip_blocks += 1
                 raise
 
@@ -334,11 +354,11 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
             try:
                 n_blocks += 1
                 if pos == 0:
-                    data = scan_next_block(fi)
+                    data = scan_next_block(fi, strict=strict_mode)
                 else:
-                    data = read_next_block(fi)
+                    data = read_next_block(fi, strict=strict_mode)
             except BAMException as e:
-                logger.warning(str(e))
+                logger.info(str(e))
                 n_malformed_gzip_blocks += 1
                 tracking_data.append([e.kind, file_ptr])
                 pos = 0
@@ -359,7 +379,7 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
                     data = data[pos:]
                     pos = 0
                 if len(data) < 36: # buffer is empty
-                    sys.stderr.write(f'\033[Kbuffer size below 36 AT {file_ptr}\n')
+                    logger.info(f'\033[Kbuffer size below 36 AT {file_ptr}\n')
                     data = []
                     pos = 0
                     break
@@ -386,11 +406,11 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
                         # logger.info('extending alignment block to {} (current {})'.format(block_size, len(data) - pos))
                         try:
                             n_blocks += 1
-                            data += read_next_block(fi)
+                            data += read_next_block(fi, strict=strict_mode)
                         except BAMException as e:
                             tracking_data.append([e.kind, file_ptr])
                             n_malformed_gzip_blocks += 1
-                            logger.warning('\033[Kfailed to loading : {}'.format(str(e)))
+                            logger.info('\033[Kfailed to loading : {}'.format(str(e)))
                             data = []
                             break
                         except Exception as e:
@@ -479,7 +499,7 @@ def retrieve_fastq_from_bam(filename_bam:str, filename_fastq:str, **kwargs)->dic
                         while pos > len(data):
                             try:
                                 n_blocks += 1
-                                data += read_next_block(fi)
+                                data += read_next_block(fi, strict=strict_mode)
                                 sys.stderr.write('buffer extended to {} / {}\n'.format(pos, len(data)))
                             except:
                                 tracing_ptr[TRACE_ID_READING] = file_ptr
@@ -529,6 +549,7 @@ def main():
                         help='output mode (test:no output, fq/fastq:fastq fqz/fastq.gz/gzipped fastq, fa/fasta:fasta, fz:gzipped fasta)')
     parser.add_argument('--limit', type=int, default=0)
     parser.add_argument('-V', '--version', action='store_true', help='Show current version')
+    parser.add_argument('--strict', action='store_true', help='Check CRC32')
     parser.add_argument('-p', type=int, default=4, metavar='number', help='Number of threads for gzip compression, this option is ignored if mode is not gzipped output')
     
     args, cmds = parser.parse_known_args()
@@ -561,13 +582,15 @@ def main():
     fasta = mode in ('fa', 'fasta', 'fa.gz', 'fz')
 
     logger = _get_logger(os.path.basename(__file__))
-    if args.verbose:
+    verbose = args.verbose
+    if verbose:
         logger.setLevel(10)
     info = {
         'command':sys.argv,
         'input':filenames,
         'files':[],
     }
+    strict_mode = args.strict
     
     if filenames is None:
         raise Exception('no BAM files given')
@@ -583,7 +606,7 @@ def main():
                 filename_out = os.path.join(outdir, title + '.fastq')
             if (not stdout_mode) and gzipped:
                 filename_out += '.gz'
-            finfo = retrieve_fastq_from_bam(filename, filename_out, logger=logger, limit=limit, threads=n_threads, fileseek=seek_pos)
+            finfo = retrieve_fastq_from_bam(filename, filename_out, verbose=verbose, limit=limit, threads=n_threads, fileseek=seek_pos, strict=strict_mode)
             # output error log
             tracking_data = finfo.pop('error.log', [])
             if outdir is not None:
