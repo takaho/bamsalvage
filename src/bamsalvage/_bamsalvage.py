@@ -6,8 +6,11 @@ import numba
 import numpy as np
 
 def version():
-    import bamsalvage
-    return bamsalvage.__version__
+    try:
+        import bamsalvage
+        return bamsalvage.__version__
+    except:
+        return '0.1.6'
 
 # Error handling
 class BAMException(Exception):
@@ -53,8 +56,17 @@ class BAMException(Exception):
 
 # Optimized functions using Numba
 @numba.njit(cache=True)
-def convert_bytes_to_seq(buffer:bytes, start:int, l_seq:int, text:bytearray):
+def convert_bytes_to_seq(buffer:bytes, start:int, l_seq:int, text:bytearray)->None:
     """Convert 4-byte encoded sequence to ASCII
+    Args:
+        buffer (readonly byte array) : uncompressed block
+        start (int64) : start position
+        l_seq (int64) : length of the sequence
+        text (mutable byte array) : text
+    Raises:
+        BamException: BAM processing error
+    Returns:
+        void
     """
     bases = [61, 65, 67, 77, 71, 82, 83, 86, 84, 87, 89, 72, 75, 68, 66, 78] # '=ACMGRSVTWYHKDBN'
     j = 0
@@ -65,9 +77,20 @@ def convert_bytes_to_seq(buffer:bytes, start:int, l_seq:int, text:bytearray):
         if j + 1 >= l_seq: break
         text[j+1] = bases[b & 15]
         j += 2
+
 @numba.njit(cache=True)
-def convert_bytes_to_qual(buffer:bytes, start:int, l_seq:int, text:bytearray):
-    """Convert byte array into QUAL sequence"""
+def convert_bytes_to_qual(buffer:bytes, start:int, l_seq:int, text:bytearray)->None:
+    """Convert byte array into QUAL sequence
+    Args:
+        buffer (readonly byte array) : uncompressed block
+        start (int64) : start position
+        l_seq (int64) : length of the sequence
+        text (mutable byte array) : text
+    Raises:
+        BamException: BAM processing error
+    Returns:
+        void
+    """
     for i in range(l_seq):
         text[i] = min(33 + buffer[start+i], 126)
 
@@ -136,7 +159,7 @@ def scan_next_block(handler, **kwargs):
     Raises:
         BamException: BAM processing error
     Returns:
-        _type_: _description_
+        bytearray : uncompressed block
     """
     current_pos = handler.tell()
     strict_mode = kwargs.get('strict', False)
@@ -175,7 +198,7 @@ def read_next_block(handler, **kwargs):
     Raises:
         BamException: BAM processing error
     Returns:
-        _type_: _description_
+        bytearray : uncompressed block
     """
     # GZIP header, ID1=31, ID2=139
     strict_mode = kwargs.get('strict', False)
@@ -541,16 +564,16 @@ def main():
     e, f, d : float 2, 4, 8
     """
     parser = argparse.ArgumentParser()
-    parser.add_argument('-i', '--input', nargs='+')
-    parser.add_argument('-o','--outdir', default=None)
-    parser.add_argument('--seek', default=0, type=int, help='seek position, start from given position by percent(0-100, default 0)')
-    parser.add_argument('--verbose', action='store_true')
+    parser.add_argument('-i', '--input', nargs='+', metavar='BAM file')
+    parser.add_argument('-o','--outdir', default=None, metavar='directory', help='Destination of sequences, standard output if not specified')
     parser.add_argument('--mode', choices=['test', 'fasta', 'fasta.gz', 'fastq', 'fastq.gz', 'fa.gz', 'fa', 'fz', 'fq', 'fqz'], default='fastq.gz',
                         help='output mode (test:no output, fq/fastq:fastq fqz/fastq.gz/gzipped fastq, fa/fasta:fasta, fz:gzipped fasta)')
+    parser.add_argument('--seek', default=0, type=int, help='seek position, start from given position by percent(0-100, default 0)')
     parser.add_argument('--limit', type=int, default=0)
-    parser.add_argument('-V', '--version', action='store_true', help='Show current version')
-    parser.add_argument('--strict', action='store_true', help='Check CRC32')
     parser.add_argument('-p', type=int, default=4, metavar='number', help='Number of threads for gzip compression, this option is ignored if mode is not gzipped output')
+    parser.add_argument('--not-strict', action='store_true', help='Skip length and CRC32 validation')
+    parser.add_argument('--verbose', action='store_true')
+    parser.add_argument('-V', '--version', action='store_true', help='Show current version')
     
     args, cmds = parser.parse_known_args()
     if args.version:
@@ -590,7 +613,7 @@ def main():
         'input':filenames,
         'files':[],
     }
-    strict_mode = args.strict
+    strict_mode = not args.not_strict
     
     if filenames is None:
         raise Exception('no BAM files given')
