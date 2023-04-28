@@ -26,6 +26,9 @@ Options:
   -i, --input <FILE>     Input BAM file
   -o, --output <FILE>    Output filename
   -l, --limit <integer>  Limiting counts [default: 0]
+  --split <integer>      Split output file by million reads
+  --seek <integer>       Start from given file position
+  --not-strict           Skip BGZF block size and CRC32 consistency (not recommended)
   --mode                 Output format (fa:fasta, fa.gz:gzipped fasta, fastq:fastq, fastq.gz(default):gzipped fastq)
   -v, --verbose          verbosity
   -h, --help             Print help
